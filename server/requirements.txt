@@ -1,0 +1,17 @@
+# MotionBricks Unity 桥接 —— 服务端依赖
+#
+# 重要：不要在普通 pip 环境里装这些。motionbricks 仓库自带 warp / tensorrt /
+# numpy 等重型依赖，只能在它的 uv 环境里运行。启动方式（二选一）：
+#
+#   1) 临时注入（推荐，无需改仓库环境）：
+#        cd /path/to/motionbricks
+#        uv run --with fastapi --with uvicorn \
+#            python /path/to/motionbricks_server.py --host 0.0.0.0 --port 8000
+#
+#   2) 先把下面两行装进仓库的 uv 环境，再直接跑：
+#        cd /path/to/motionbricks
+#        uv pip install -r server/requirements.txt
+#        uv run python /path/to/motionbricks_server.py
+#
+fastapi>=0.110
+uvicorn>=0.29
