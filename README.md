@@ -1,124 +1,174 @@
-# MotionBricks ↔ Unity 桥接
+# MotionBricks ↔ Unity Bridge
 
-用 NVIDIA MotionBricks（SIGGRAPH 2026，实时动作生成模型）驱动 Unity Humanoid 角色。
-架构：**Python FastAPI 推理服务**（跑在有 NVIDIA GPU 的主机上，直接复用官方
-`MotionBricksSOMAEngine`，保证编码 / 推理 / 解码 / 端点修正与官方 demo 完全一致）
-+ **Unity C# 客户端**（HTTP 调用、Humanoid 骨骼映射、30fps 播放与无限链式生成）。
+Drive Unity Humanoid characters with NVIDIA MotionBricks (SIGGRAPH 2026, a real-time motion-generation model).
+Two ways to use it:
+
+- **Realtime client** — a **Python FastAPI inference server** (runs on an NVIDIA-GPU host and reuses the official
+  `MotionBricksSOMAEngine`, so encoding / inference / decoding / endpoint correction exactly match the official demo)
+  + a **Unity C# client** (HTTP calls, Humanoid bone mapping, 30fps playback with infinite chained generation).
+- **Offline clip baker** ("motion factory" editor tool) — calls the same inference server from the Unity Editor and
+  bakes the generated motion into `.anim` files. This is the recommended route for **mobile games**: zero inference,
+  zero networking, and zero GPU cost at runtime.
+
+> 中文版 README 见 [README.zh-CN.md](README.zh-CN.md)
 
 ```
 ┌─────────────────────────────┐         HTTP/JSON          ┌──────────────────────────────┐
-│ Unity 客户端                 │   POST /generate           │ 推理服务（GPU 主机）          │
+│ Unity client                 │   POST /generate           │ Inference server (GPU host)  │
 │                             │ ─────────────────────────► │                              │
-│ SomaHumanoidMapper           │   {context: 4姿态,         │ motionbricks_server.py       │
-│   抓取 Humanoid 姿态         │    targets: 1~4姿态}       │   MotionBricksSOMAEngine     │
-│   Unity左手系 → SOMA右手系   │                            │   (官方引擎，FP32/FP16 ONNX)  │
-│                             │ ◄───────────────────────── │                              │
-│ MotionBricksPlayer          │   {frames: [...],          │ 直接调 create_input /        │
-│   30fps 播放 + 过渡点        │    num_frames,            │ update_from_poses /          │
-│   自动链式生成               │    sample_rate: 30}       │ generate_animation / sample  │
+│ SomaHumanoidMapper           │   {context: 4 poses,       │ motionbricks_server.py       │
+│   capture Humanoid pose      │    targets: 1-4 poses}     │   MotionBricksSOMAEngine     │
+│   Unity left-handed →        │                            │   (official engine,          │
+│   SOMA right-handed          │ ◄───────────────────────── │    FP32/FP16 ONNX)           │
 │                             │                            │                              │
-│ LocomotionDemo              │                            │ 首次启动构建 TensorRT plan   │
-│   WASD → 目标点 → 循环生成   │                            │ （几分钟，之后走 .trt-cache） │
+│ MotionBricksPlayer          │   {frames: [...],          │ Calls create_input /        │
+│   30fps playback + chained   │    num_frames,            │ update_from_poses /          │
+│   generation at transition   │    sample_rate: 30}       │ generate_animation / sample  │
+│                             │                            │ directly                     │
+│ LocomotionDemo              │                            │                              │
+│   WASD → target → loop       │                            │ First launch builds a        │
+│                             │                            │ TensorRT plan (minutes,      │
+│ Editor: Clip Baker          │                            │ then cached in .trt-cache)   │
+│   Tools > MotionBricks >     │                            │                              │
+│   Clip Baker (offline bake)  │                            │                              │
 └─────────────────────────────┘                            └──────────────────────────────┘
 ```
 
-## 目录结构
+## Repository layout
 
 ```
 motionbricks-unity-bridge/
-├── README.md
+├── README.md                        # English (this file)
+├── README.zh-CN.md                  # 中文版
+├── LICENSE                          # Apache 2.0
 ├── server/
-│   ├── motionbricks_server.py   # FastAPI 推理服务
-│   └── requirements.txt         # fastapi + uvicorn（装法见下）
+│   ├── motionbricks_server.py       # FastAPI inference server
+│   └── requirements.txt             # fastapi + uvicorn (install notes below)
 └── unity/
-    └── Scripts/
-        ├── SomaPose.cs           # 姿态数据结构 + 线路 JSON 编解码（手写解析器，无第三方依赖）
-        ├── MotionBricksClient.cs # HTTP 客户端（UnityWebRequest，async Task 接口）
-        ├── SomaHumanoidMapper.cs # SOMA 30关节 ↔ HumanBodyBones 映射 + 抓取/回放 + 比例重定向
-        ├── MotionBricksPlayer.cs # 30fps 播放器 + 过渡点自动链式生成
-        └── LocomotionDemo.cs     # WASD 演示控制器
+    ├── Scripts/                     # runtime (copy into any non-Editor folder)
+    │   ├── SomaPose.cs              # pose structs + hand-written JSON codec (no dependencies)
+    │   ├── MotionBricksClient.cs    # HTTP client (UnityWebRequest, async Task API)
+    │   ├── SomaHumanoidMapper.cs    # SOMA 30 joints ↔ HumanBodyBones mapping, capture/playback
+    │   ├── MotionBricksPlayer.cs    # 30fps player + auto-chained generation
+    │   └── LocomotionDemo.cs        # WASD demo controller
+    └── Editor/                      # editor-only (must live under an Editor folder)
+        ├── MotionBricksClipBaker.cs # Clip Baker window: Tools > MotionBricks > Clip Baker
+        └── MotionBricksBakeRunner.cs# hidden coroutine driver for bake-time HTTP requests
 ```
 
-## 环境要求
+## Requirements
 
-服务端（GPU 主机）：
-- NVIDIA GPU、CUDA 12、TensorRT、Python 3.12
-- motionbricks 仓库（`git clone https://github.com/NVlabs/motionbricks.git`）及其 uv 环境
-  （warp / tensorrt 等重型依赖只能从仓库环境来）
+Server (GPU host):
+- NVIDIA GPU, CUDA 12, TensorRT, Python 3.12
+- The motionbricks repository (`git clone https://github.com/NVlabs/motionbricks.git`) with its uv environment
+  (heavy dependencies like warp / tensorrt only come from the repo environment)
 
-客户端：
-- Unity 2021.3+，角色带 Humanoid Avatar；只用 UnityWebRequest + 手写 JSON，不依赖第三方包
+Client:
+- Unity 2021.3+, character with a Humanoid Avatar; only UnityWebRequest + hand-written JSON, no third-party packages
 
-## 服务端启动
+## Starting the server
 
 ```sh
 cd /path/to/motionbricks
-# 方式一：临时注入依赖（推荐，不动仓库环境）
+# Option 1: inject dependencies temporarily (recommended, leaves the repo env untouched)
 uv run --with fastapi --with uvicorn \
     python /path/to/motionbricks-unity-bridge/server/motionbricks_server.py \
     --host 0.0.0.0 --port 8000
 
-# 方式二：装进仓库环境
+# Option 2: install into the repo environment
 uv pip install -r /path/to/motionbricks-unity-bridge/server/requirements.txt
 uv run python /path/to/motionbricks-unity-bridge/server/motionbricks_server.py
 ```
 
-环境变量：`MOTIONBRICKS_PRECISION=fp16` 切混合精度 ONNX（默认 fp32）；
-`MOTIONBRICKS_CACHE_DIR` 改 plan 缓存目录；`MOTIONBRICKS_FORCE_REBUILD=1` 强制重建 plan。
+Environment variables: `MOTIONBRICKS_PRECISION=fp16` selects the mixed-precision ONNX (default fp32);
+`MOTIONBRICKS_CACHE_DIR` changes the plan cache directory; `MOTIONBRICKS_FORCE_REBUILD=1` forces a plan rebuild.
 
-验证：`curl http://localhost:8000/info` 应返回模型名、30 个关节名、坐标系说明；
-`curl http://localhost:8000/health` 应返回 `{"ok": true}`。
+Verify: `curl http://localhost:8000/info` should return the model name, the 30 joint names and the
+coordinate-system notes; `curl http://localhost:8000/health` should return `{"ok": true}`.
 
-## Unity 导入与挂载
+## Unity setup (realtime client)
 
-1. 把 `unity/Scripts/` 下 5 个 `.cs` 文件拷进 Unity 项目（任意 Editor 外目录）。
-2. 角色要求：带 Humanoid Avatar 的角色预制体，Animator 组件的 Controller **留空**
-   （不要有其他 Clip 在播；applyRootMotion 关掉也行，留空最省心）。
-3. 在角色根物体上挂载：`SomaHumanoidMapper`、`MotionBricksClient`、`MotionBricksPlayer`
-  （后两者留空会自动取本物体的引用；mapper 的 animator 留空自动取本物体）。
-4. `MotionBricksClient.serverUrl` 填服务端地址，如 `http://192.168.1.10:8000`。
-5. `SomaHumanoidMapper.characterHeight`：0 = 自动估算（Hips 高 × 2，近似），
-   最好手动量一下填准确值。
-6. 演示：再挂 `LocomotionDemo`，运行后 WASD/方向键移动，Shift 跑。
-7. 进阶：自己写脚本调 `player.SetLocomotionTarget(worldPos, speed)` /
-   `player.SetTargetPose(pose)` 即可驱动；`player.PlayOneShot(clip)` 可直接播外部 clip。
+1. Copy the 5 `.cs` files from `unity/Scripts/` into your Unity project (any non-Editor folder).
+2. Character requirements: a prefab with a Humanoid Avatar; leave the Animator's Controller **empty**
+   (no other clip playing; disabling applyRootMotion also works, empty is simplest).
+3. Attach to the character root: `SomaHumanoidMapper`, `MotionBricksClient`, `MotionBricksPlayer`
+   (the latter two auto-resolve references on the same object; the mapper's animator auto-resolves too).
+4. Set `MotionBricksClient.serverUrl`, e.g. `http://192.168.1.10:8000`.
+5. `SomaHumanoidMapper.characterHeight`: 0 = auto-estimate (hips height × 2, approximate);
+   measuring it manually is more accurate.
+6. Demo: also attach `LocomotionDemo`, press Play, move with WASD / arrow keys, hold Shift to run.
+7. Advanced: drive it from your own scripts via `player.SetLocomotionTarget(worldPos, speed)` /
+   `player.SetTargetPose(pose)`; `player.PlayOneShot(clip)` plays an externally obtained clip.
 
-## HTTP 协议
+## Offline clip baker ("motion factory")
 
-`POST /generate`，`Content-Type: application/json`。
+The baker (`Tools > MotionBricks > Clip Baker`) turns MotionBricks into a motion factory:
+generate once in the Editor, ship plain `.anim` files with your game.
 
-请求（context 恰好 4 个姿态，targets 1~4 个；单位米、Y-up 右手系 = SOMA 模型空间）：
+**Why offline instead of realtime requests for mobile games?**
+- Phones have no CUDA GPU — the model cannot run on-device.
+- Cloud inference bills per concurrent GPU — prohibitive at game scale.
+- Offline single-player games cannot depend on a network connection.
+
+Baked clips are ordinary `AnimationClip`s: zero latency, zero server cost, playable offline,
+version-controllable, and open to further editing.
+
+**Workflow (3 steps):**
+1. **Configure Takes** in the baker window:
+   - *Pose Sequence mode* — pose your character in the scene, click "Capture current pose as target"
+     for each key pose; the tool chains generations through them in order.
+   - *Path mode* — drop empty GameObjects as waypoints; the tool walks the character root through
+     each waypoint facing the travel direction ("segments per target" = 2–3 for longer walks).
+2. **Bake All Takes** — the tool chains `/generate` requests (each new context = the last 4 generated
+   frames), concatenates everything, and shows progress; a failed Take is logged without aborting the rest.
+3. **Use the clips** — baked to `Assets/MotionBricks/Baked/<TakeName>.anim`; drag into your Animator.
+   Options per Take: *in-place* (horizontal displacement removed, for code-driven movement) or
+   *with displacement* (root motion baked into the Hips bone, for directly playable actions).
+
+**Baked clip conventions** (generic transform curves, 30fps):
+- Hips carries normalized root motion (origin subtracted, initial yaw removed) — play the clip with
+  the character root at the origin.
+- All other bones store the local transforms written by the mapper (Neck already includes the
+  merged Neck2; bones missing on your character are skipped silently).
+- Quaternion sign continuity is enforced across frames so curve interpolation never pops.
+
+## HTTP protocol
+
+`POST /generate`, `Content-Type: application/json`.
+
+Request (exactly 4 context poses, 1–4 target poses; meters, Y-up right-handed = SOMA model space):
 
 ```json
 {
   "context": [
     {
       "root": {"p": [0.0, 0.98, 0.0], "q": [0, 0, 0, 1]},
-      "joints": [[0.0, 0.98, 0.0, 0, 0, 0, 1], [0.0, 0.10, 0.0, 0, 0, 0, 1], "...30个×7个数..."]
+      "joints": [[0.0, 0.98, 0.0, 0, 0, 0, 1], [0.0, 0.10, 0.0, 0, 0, 0, 1], "...30 × 7 numbers..."]
     }
   ],
-  "targets": ["...同上格式，1~4个..."]
+  "targets": ["...same format, 1-4 poses..."]
 }
 ```
 
-- 每个姿态 = `root`（Hips 的世界放置）+ `joints`（30 个关节局部变换，
-  每个 `[x, y, z, x, y, z, w]`，index 0 = Hips，服务端以 `root` 为准）。
-- 非法输入（关节数不对、targets 越界、非有限数值）→ `400`；推理异常 → `500` + 错误信息。
+- One pose = `root` (world placement of Hips) + `joints` (local transforms of the 30 joints,
+  each `[x, y, z, x, y, z, w]`, index 0 = Hips; the server trusts `root`).
+- Invalid input (wrong joint count, out-of-range target count, non-finite numbers) → `400`;
+  inference failure → `500` + error message.
 
-响应：
+Response:
 
 ```json
 {
-  "frames": ["...与请求姿态同格式..."],
+  "frames": ["...same pose format..."],
   "num_frames": 42,
   "sample_rate": 30
 }
 ```
 
-`num_frames` 为有效帧数（18~58，约 0.6~1.9 秒）；服务端已做边界帧去除与端点修正，
-第 0 帧 ≈ context 末姿态，可直接续播。
+`num_frames` is the valid frame count (18–58, about 0.6–1.9 s); boundary frames are trimmed and
+endpoint correction applied server-side, so frame 0 ≈ the last context pose and plays seamlessly.
 
-## 关节映射表（SOMA index → Unity HumanBodyBones）
+## Joint mapping (SOMA index → Unity HumanBodyBones)
 
 | SOMA | Unity | SOMA | Unity |
 |---|---|---|---|
@@ -126,42 +176,47 @@ uv run python /path/to/motionbricks-unity-bridge/server/motionbricks_server.py
 | 1 Spine1 | Spine | 16 RightShoulder | RightShoulder |
 | 2 Spine2 | Chest | 17 RightArm | RightUpperArm |
 | 3 Chest | UpperChest | 18 RightForeArm | RightLowerArm |
-| 4 Neck1 | Neck（回放时与 Neck2 合并写入） | 19 RightHand | RightHand |
-| 5 Neck2 | （无）抓取填参考偏移+单位旋转；回放并入 Neck | 20 RightHandThumbEnd | RightThumbDistal |
+| 4 Neck1 | Neck (merged with Neck2 on playback) | 19 RightHand | RightHand |
+| 5 Neck2 | (none) capture uses reference offset + identity; merged into Neck on playback | 20 RightHandThumbEnd | RightThumbDistal |
 | 6 Head | Head | 21 RightHandMiddleEnd | RightMiddleDistal |
-| 7 Jaw | Jaw（缺失则回退） | 22 LeftLeg | LeftUpperLeg |
-| 8 LeftEye | LeftEye（缺失则回退） | 23 LeftShin | LeftLowerLeg |
-| 9 RightEye | RightEye（缺失则回退） | 24 LeftFoot | LeftFoot |
+| 7 Jaw | Jaw (falls back if missing) | 22 LeftLeg | LeftUpperLeg |
+| 8 LeftEye | LeftEye (falls back if missing) | 23 LeftShin | LeftLowerLeg |
+| 9 RightEye | RightEye (falls back if missing) | 24 LeftFoot | LeftFoot |
 | 10 LeftShoulder | LeftShoulder | 25 LeftToeBase | LeftToes |
 | 11 LeftArm | LeftUpperArm | 26 RightLeg | RightUpperLeg |
 | 12 LeftForeArm | LeftLowerArm | 27 RightShin | RightLowerLeg |
 | 13 LeftHand | LeftHand | 28 RightFoot | RightFoot |
 | 14 LeftHandThumbEnd | LeftThumbDistal | 29 RightToeBase | RightToes |
 
-坐标系：Unity 左手系 Y-up ↔ SOMA 右手系 Y-up，采用标准镜像转换
-（位置 `z → -z`，四元数 `(x,y,z,w) → (-x,-y,z,w)`，自逆），
-见 `SomaHumanoidMapper.MirrorPosition/MirrorRotation`。
+Coordinate systems: Unity left-handed Y-up ↔ SOMA right-handed Y-up via the standard mirror
+transform (position `z → -z`, quaternion `(x,y,z,w) → (-x,-y,z,w)`, self-inverse);
+see `SomaHumanoidMapper.MirrorPosition/MirrorRotation`.
 
-## 已知限制（必读）
+## Limitations (must read)
 
-1. **服务端未经 GPU 实测**：作者开发机无 GPU，推理链路只对齐了官方 API 签名、
-   做了 `py_compile`，未端到端跑通。首次部署请先 `curl /info`，
-   再用少量请求验证返回帧数/动作合理性，确认无误再接 Unity。
-2. **坐标系镜像转换需用 T-pose 验证**：`z → -z` 是标准镜像假设，
-   但不同角色的建模朝向可能不同。首次使用请按 `SomaHumanoidMapper` 注释里的三步
-   用 T-pose 对照验证，左右/前后反了就调整镜像函数。
-3. **重定向是近似方案**：只按身高比缩放位置、旋转直接映射。
-   体型差异大（如 Q 版角色、非人比例）会出现穿插/脚滑，需要专业重定向管线
-   （如 Unity Animation Rigging 或离线重定向工具），不要指望本桥接搞定。
-4. **模型只管运动学**：MotionBricks 生成的是关节姿态，不管物理 feasibility；
-   生成动作可能出现轻微穿插，高速/大步幅目标更容易出现。
-5. 其他：单次生成 0.6~1.9 秒，靠链式续接；服务端 GPU 推理串行化（多角色请排队
-   或起多实例）；局域网延迟决定 locomotion 响应速度，`regenerateCooldown`
-   默认 0.5 秒。
+1. **Server never tested on a GPU by the author**: the dev machine has no GPU; the inference path
+   only matches the official API signatures and passes `py_compile` — it has not run end-to-end.
+   On first deployment, `curl /info` first, then validate frame counts / motion sanity with a few
+   small requests before wiring up Unity.
+2. **Verify the mirror transform with a T-pose**: `z → -z` is the standard mirror assumption,
+   but authoring orientation differs per character. Follow the three-step T-pose check in the
+   `SomaHumanoidMapper` comments on first use; flip the mirror axis if left/right or
+   front/back come out reversed.
+3. **Retargeting is approximate**: positions are scaled by height ratio, rotations mapped directly.
+   Very different proportions (chibi characters, non-human ratios) will show interpenetration /
+   foot sliding — use a proper retargeting pipeline (e.g. Unity Animation Rigging or an offline
+   retargeting tool); don't expect this bridge to solve it.
+4. **The model is kinematic-only**: MotionBricks outputs joint poses with no physics feasibility
+   guarantees; slight interpenetration can occur, more likely with fast / long-stride targets.
+5. **Baked clips assume the character root at the origin on playback** (Hips motion is normalized);
+   baked clips are generic transform clips, not Humanoid muscle-space clips.
+6. Misc: one generation is 0.6–1.9 s, extended by chaining; server-side GPU inference is
+   serialized (queue multiple characters or run more instances); LAN latency sets locomotion
+   responsiveness, `regenerateCooldown` defaults to 0.5 s.
 
-## 许可证
+## License
 
-- 本桥接代码（`server/`、`unity/`）：Apache 2.0。
-- MotionBricks 官方代码：Apache 2.0；**预训练权重遵循 NVIDIA Open Model License，
-  商用需署名**并遵守其 trustworthy-AI 条款。权重随 motionbricks 仓库自带 ONNX 分发，
-  不包含在本项目内。
+- This bridge's code (`server/`, `unity/`): Apache 2.0.
+- MotionBricks official code: Apache 2.0; **pretrained weights are under the NVIDIA Open Model
+  License — commercial use requires attribution** and compliance with its trustworthy-AI terms.
+  Weights ship as ONNX with the motionbricks repository and are not included in this project.
