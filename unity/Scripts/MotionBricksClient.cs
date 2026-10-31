@@ -12,7 +12,10 @@ namespace MotionBricksBridge
     /// <summary>
     /// 挂在场景任意 GameObject 上（建议与 MotionBricksPlayer 同一物体）。
     /// GenerateAsync 用协程驱动 UnityWebRequest，再以 Task 形式返回，不阻塞主线程。
+    /// [ExecuteAlways]：让编辑器烘焙工具（Tools > MotionBricks > Clip Baker）
+    /// 在编辑模式下也能驱动它的协程；运行时行为不受影响。
     /// </summary>
+    [ExecuteAlways]
     public class MotionBricksClient : MonoBehaviour
     {
         [Tooltip("推理服务地址，例如 http://192.168.1.10:8000")]
