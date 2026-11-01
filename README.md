@@ -82,7 +82,7 @@ python3 -m venv .venv
 .venv/bin/pytest server/tests -v
 ```
 
-Real GPU `/generate` acceptance is still manual — run it on a CUDA/TensorRT host after you connect that machine.
+GPU first-boot on Nick (RTX 3060, 2026-11-01 Asia/Shanghai) **PASS** — see [docs/TESTING.md](docs/TESTING.md) and [docs/GPU_VERIFY_NICK_2026-11-01.md](docs/GPU_VERIFY_NICK_2026-11-01.md). Re-run the same checklist on any new CUDA host.
 
 ## Starting the server
 
@@ -212,8 +212,7 @@ see `SomaHumanoidMapper.MirrorPosition/MirrorRotation`.
 
 ## Limitations (must read)
 
-1. **Server never tested on a GPU by the author**: the dev machine has no GPU; the inference path
-   only matches the official API signatures and passes `py_compile` — it has not run end-to-end.
+1. **GPU first-boot verified on Nick (2026-11-01)**; full Humanoid Clip Baker still needs a character asset on that machine.
    On first deployment, `curl /info` first, then validate frame counts / motion sanity with a few
    small requests before wiring up Unity.
 2. **Verify the mirror transform with a T-pose**: `z → -z` is the standard mirror assumption,

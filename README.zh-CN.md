@@ -79,7 +79,7 @@ python3 -m venv .venv
 .venv/bin/pytest server/tests -v
 ```
 
-真实 GPU 上的 `/generate` 验收仍需连上 CUDA/TensorRT 机器后手动做。
+Nick（RTX 3060，2026-11-01 Asia/Shanghai）GPU 首启已 **PASS**——见 [docs/TESTING.md](docs/TESTING.md) 与 [docs/GPU_VERIFY_NICK_2026-11-01.md](docs/GPU_VERIFY_NICK_2026-11-01.md)。换新 CUDA 主机请重跑同一清单。
 
 ## 服务端启动
 
@@ -205,9 +205,8 @@ uv run python /path/to/motionbricks-unity-bridge/server/motionbricks_server.py
 
 ## 已知限制（必读）
 
-1. **服务端未经 GPU 实测**：作者开发机无 GPU，推理链路只对齐了官方 API 签名、
-   做了 `py_compile`，未端到端跑通。首次部署请先 `curl /info`，
-   再用少量请求验证返回帧数/动作合理性，确认无误再接 Unity。
+1. **GPU 首启已在 Nick（2026-11-01）验证**；完整 Humanoid Clip Baker 仍需本机有角色资源。
+   换新机器部署时仍建议先 `curl /info`，再用少量请求确认帧数/动作合理性后再接 Unity。
 2. **坐标系镜像转换需用 T-pose 验证**：`z → -z` 是标准镜像假设，
    但不同角色的建模朝向可能不同。首次使用请按 `SomaHumanoidMapper` 注释里的三步
    用 T-pose 对照验证，左右/前后反了就调整镜像函数。

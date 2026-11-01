@@ -75,6 +75,9 @@ internal class MotionBricksBakeRunner : MonoBehaviour
     // 烘焙主循环
     // ------------------------------------------------------------------
 
+    // Set by RequestSegment instead of throwing across yields (C# forbids yield in try/catch).
+    private string _segmentError;
+
     private IEnumerator BakeCoroutine(BakePlan plan)
     {
         var results = new List<TakeBakeResult>();
@@ -84,76 +87,129 @@ internal class MotionBricksBakeRunner : MonoBehaviour
         foreach (var take in plan.takes)
         {
             var result = new TakeBakeResult { takeName = take.takeName, take = take };
+            var frames = new List<SomaPose>();
+            List<SomaPose> context = null;
+            SomaPose seed = null;
+            string setupError = null;
+
+            // Setup without yields so try/catch is legal.
             try
             {
-                var frames = new List<SomaPose>();
-
-                // 用场景当前姿态播种 context（与运行时播放器一致：同一姿态 ×4）。
                 // CapturePose 复用 SomaHumanoidMapper 的抓取 + 坐标转换逻辑。
-                var seed = plan.mapper.CapturePose();
-                var context = new List<SomaPose>
+                seed = plan.mapper.CapturePose();
+                context = new List<SomaPose>
                 {
                     seed.Clone(), seed.Clone(), seed.Clone(), seed.Clone()
                 };
-
                 if (take.mode == BakeMode.PoseSequence)
                 {
                     if (take.poseTargets == null || take.poseTargets.Count == 0)
                         throw new MotionBricksException("姿态序列为空：请先在场景摆好姿态并逐个抓取目标");
-                    int ti = 0;
-                    foreach (var target in take.poseTargets)
-                    {
-                        ti++;
-                        for (int s = 0; s < take.segmentsPerTarget; s++)
-                        {
-                            yield return RequestSegment(context,
-                                new List<SomaPose> { target.Clone() }, frames);
-                            done++;
-                            Progress?.Invoke((float)done / total,
-                                $"[{take.takeName}] 目标 {ti}/{take.poseTargets.Count} · 段 {s + 1}/{take.segmentsPerTarget}");
-                        }
-                    }
                 }
-                else // BakeMode.Path
+                else
                 {
                     if (take.waypoints == null || take.waypoints.Count == 0)
                         throw new MotionBricksException("路径点为空：请先添加 waypoint");
-                    float s = plan.mapper.PositionScale;
-                    // Hips 高度（Unity 空间）：waypoint 只定水平位置，高度保持不变。
-                    float hipsHeightU = SomaHumanoidMapper.MirrorPosition(seed.root.p).y * s;
-                    Vector3 prevFlat = new Vector3(
-                        SomaHumanoidMapper.MirrorPosition(seed.root.p).x * s, 0f,
-                        SomaHumanoidMapper.MirrorPosition(seed.root.p).z * s);
-                    // 身体模板：首段用场景姿态，之后用上一段的最后一帧，保证身体连贯。
-                    SomaPose bodyTemplate = seed;
-                    int wi = 0;
-                    foreach (var wp in take.waypoints)
-                    {
-                        wi++;
-                        if (wp == null)
-                            throw new MotionBricksException($"第 {wi} 个 waypoint 未设置（None），请检查路径点列表");
-                        Vector3 flat = new Vector3(wp.position.x, 0f, wp.position.z);
-                        var target = BuildWaypointTarget(bodyTemplate, prevFlat, flat, hipsHeightU, s);
-                        prevFlat = flat;
-                        for (int sg = 0; sg < take.segmentsPerTarget; sg++)
-                        {
-                            yield return RequestSegment(context,
-                                new List<SomaPose> { target }, frames);
-                            bodyTemplate = frames[frames.Count - 1];
-                            done++;
-                            Progress?.Invoke((float)done / total,
-                                $"[{take.takeName}] 路径点 {wi}/{take.waypoints.Count} · 段 {sg + 1}/{take.segmentsPerTarget}");
-                        }
-                    }
                 }
-
-                if (frames.Count == 0)
-                    throw new MotionBricksException("未生成任何帧");
-                result.frames = frames;
             }
             catch (Exception e)
             {
-                result.error = UnwrapMessage(e);
+                setupError = UnwrapMessage(e);
+            }
+
+            if (setupError != null)
+            {
+                result.error = setupError;
+                results.Add(result);
+                continue;
+            }
+
+            if (take.mode == BakeMode.PoseSequence)
+            {
+                int ti = 0;
+                foreach (var target in take.poseTargets)
+                {
+                    ti++;
+                    bool takeFailed = false;
+                    for (int s = 0; s < take.segmentsPerTarget; s++)
+                    {
+                        _segmentError = null;
+                        yield return RequestSegment(context,
+                            new List<SomaPose> { target.Clone() }, frames);
+                        if (_segmentError != null)
+                        {
+                            result.error = _segmentError;
+                            takeFailed = true;
+                            break;
+                        }
+                        done++;
+                        Progress?.Invoke((float)done / total,
+                            $"[{take.takeName}] 目标 {ti}/{take.poseTargets.Count} · 段 {s + 1}/{take.segmentsPerTarget}");
+                    }
+                    if (takeFailed) break;
+                }
+            }
+            else // BakeMode.Path
+            {
+                float s = plan.mapper.PositionScale;
+                // Hips 高度（Unity 空间）：waypoint 只定水平位置，高度保持不变。
+                float hipsHeightU = SomaHumanoidMapper.MirrorPosition(seed.root.p).y * s;
+                Vector3 prevFlat = new Vector3(
+                    SomaHumanoidMapper.MirrorPosition(seed.root.p).x * s, 0f,
+                    SomaHumanoidMapper.MirrorPosition(seed.root.p).z * s);
+                // 身体模板：首段用场景姿态，之后用上一段的最后一帧，保证身体连贯。
+                SomaPose bodyTemplate = seed;
+                int wi = 0;
+                foreach (var wp in take.waypoints)
+                {
+                    wi++;
+                    SomaPose target = null;
+                    string wpError = null;
+                    try
+                    {
+                        if (wp == null)
+                            throw new MotionBricksException($"第 {wi} 个 waypoint 未设置（None），请检查路径点列表");
+                        Vector3 flat = new Vector3(wp.position.x, 0f, wp.position.z);
+                        target = BuildWaypointTarget(bodyTemplate, prevFlat, flat, hipsHeightU, s);
+                        prevFlat = flat;
+                    }
+                    catch (Exception e)
+                    {
+                        wpError = UnwrapMessage(e);
+                    }
+                    if (wpError != null)
+                    {
+                        result.error = wpError;
+                        break;
+                    }
+
+                    bool takeFailed = false;
+                    for (int sg = 0; sg < take.segmentsPerTarget; sg++)
+                    {
+                        _segmentError = null;
+                        yield return RequestSegment(context,
+                            new List<SomaPose> { target }, frames);
+                        if (_segmentError != null)
+                        {
+                            result.error = _segmentError;
+                            takeFailed = true;
+                            break;
+                        }
+                        bodyTemplate = frames[frames.Count - 1];
+                        done++;
+                        Progress?.Invoke((float)done / total,
+                            $"[{take.takeName}] 路径点 {wi}/{take.waypoints.Count} · 段 {sg + 1}/{take.segmentsPerTarget}");
+                    }
+                    if (takeFailed) break;
+                }
+            }
+
+            if (string.IsNullOrEmpty(result.error))
+            {
+                if (frames.Count == 0)
+                    result.error = "未生成任何帧";
+                else
+                    result.frames = frames;
             }
             results.Add(result);
         }
@@ -163,7 +219,7 @@ internal class MotionBricksBakeRunner : MonoBehaviour
 
     /// <summary>
     /// 向服务端请求一段生成，把返回帧拼到 frames 末尾，并用最后 4 帧刷新 context。
-    /// 失败自动重试 1 次；仍失败则抛异常（由上层记为该 Take 失败，不中断后续 Take）。
+    /// 失败自动重试 1 次；仍失败则写入 _segmentError（不能跨 yield 抛进 try/catch）。
     /// </summary>
     private IEnumerator RequestSegment(List<SomaPose> context, List<SomaPose> targets,
         List<SomaPose> frames)
@@ -175,7 +231,8 @@ internal class MotionBricksBakeRunner : MonoBehaviour
         }
         catch (Exception e)
         {
-            throw new MotionBricksException($"请求构造失败：{e.Message}");
+            _segmentError = $"请求构造失败：{e.Message}";
+            yield break;
         }
 
         int attempt = 0;
@@ -189,7 +246,10 @@ internal class MotionBricksBakeRunner : MonoBehaviour
                 attempt++;
                 string msg = UnwrapMessage(task.Exception);
                 if (attempt >= 2)
-                    throw new MotionBricksException($"服务端请求失败（已重试 1 次）：{msg}");
+                {
+                    _segmentError = $"服务端请求失败（已重试 1 次）：{msg}";
+                    yield break;
+                }
                 Debug.LogWarning($"[MotionBricks] 烘焙请求失败，正在重试：{msg}");
                 try
                 {
@@ -197,7 +257,8 @@ internal class MotionBricksBakeRunner : MonoBehaviour
                 }
                 catch (Exception e)
                 {
-                    throw new MotionBricksException($"请求构造失败：{e.Message}");
+                    _segmentError = $"请求构造失败：{e.Message}";
+                    yield break;
                 }
                 continue;
             }
@@ -206,7 +267,10 @@ internal class MotionBricksBakeRunner : MonoBehaviour
 
         var clip = task.Result;
         if (clip == null || clip.frames.Count == 0)
-            throw new MotionBricksException("服务端返回 0 帧");
+        {
+            _segmentError = "服务端返回 0 帧";
+            yield break;
+        }
 
         // 服务端第 0 帧 ≈ context 末姿态（端点修正保证）；后续段跳过该重复帧，
         // 避免曲线上出现 doubled keyframe。

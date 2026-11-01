@@ -7,10 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `MotionBricksBakeRunner`: do not `yield` inside `try/catch` (CS1626 on Unity 2022+); segment errors use `_segmentError` instead
+
+### Verified
+- **2026-11-01 Asia/Shanghai — Nick PC GPU first-boot PASS** (RTX 3060): `/health` `/info` `/generate`, TensorRT ~116 s first plan then cache; Unity 2022.3.62f3 scripts compile + Editor generate smoke + root `.anim` write. Full Humanoid baker Play Mode skipped (no Humanoid asset). See [docs/GPU_VERIFY_NICK_2026-11-01.md](docs/GPU_VERIFY_NICK_2026-11-01.md).
+
 ### Planned
-- GPU first-boot acceptance (`/health` → `/info` → small `/generate`) on a CUDA/TensorRT host
 - T-pose mirror-axis verification checklist automation notes for `SomaHumanoidMapper`
 - Optional CI job for `pytest` + `py_compile` (no GPU)
+- Humanoid end-to-end Clip Baker bake once a character asset is available
 
 ## [0.1.0] - 2026-10-31
 
@@ -30,8 +36,7 @@ Initial tagged release of the MotionBricks ↔ Unity bridge.
 - Testing guide: [docs/TESTING.md](docs/TESTING.md)
 
 ### Known limits
-- **Inference has not been end-to-end tested on a GPU by the author** (no CUDA host at authoring time).
-  First deploy must still run the README verification steps on a real NVIDIA GPU + TensorRT machine.
+- Inference GPU first-boot was later verified on Nick (2026-11-01); see Unreleased / docs. Retarget still approximate.
 - Retargeting is approximate (height-ratio scale + direct rotation map); large proportion mismatches
   need a proper retarget pipeline.
 - Model output is kinematic-only (no physics feasibility).
