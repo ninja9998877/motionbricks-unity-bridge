@@ -40,10 +40,16 @@ Two ways to use it:
 motionbricks-unity-bridge/
 ├── README.md                        # English (this file)
 ├── README.zh-CN.md                  # 中文版
+├── CHANGELOG.md                     # Keep a Changelog
 ├── LICENSE                          # Apache 2.0
+├── docs/
+│   └── TESTING.md                   # how to run GPU-free contract tests
 ├── server/
-│   ├── motionbricks_server.py       # FastAPI inference server
-│   └── requirements.txt             # fastapi + uvicorn (install notes below)
+│   ├── protocol.py                  # GPU-free models + validation (shared with tests)
+│   ├── motionbricks_server.py       # FastAPI inference server (lazy-loads warp/motionbricks)
+│   ├── requirements.txt             # fastapi + uvicorn (install notes below)
+│   ├── requirements-dev.txt         # pytest + httpx for contract tests
+│   └── tests/                       # GPU-free contract tests (TestClient + stub engine)
 └── unity/
     ├── Scripts/                     # runtime (copy into any non-Editor folder)
     │   ├── SomaPose.cs              # pose structs + hand-written JSON codec (no dependencies)
@@ -65,6 +71,18 @@ Server (GPU host):
 
 Client:
 - Unity 2021.3+, character with a Humanoid Avatar; only UnityWebRequest + hand-written JSON, no third-party packages
+
+## Testing
+
+GPU-free contract tests (no CUDA): see [docs/TESTING.md](docs/TESTING.md).
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install -r server/requirements-dev.txt
+.venv/bin/pytest server/tests -v
+```
+
+Real GPU `/generate` acceptance is still manual — run it on a CUDA/TensorRT host after you connect that machine.
 
 ## Starting the server
 

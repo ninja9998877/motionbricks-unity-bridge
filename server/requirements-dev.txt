@@ -1,0 +1,6 @@
+# Dev / contract-test dependencies (no CUDA, no motionbricks, no warp).
+# Install into a venv:
+#   python3 -m venv .venv && .venv/bin/pip install -r server/requirements-dev.txt
+-r requirements.txt
+httpx>=0.27
+pytest>=8.0

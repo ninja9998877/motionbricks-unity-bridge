@@ -37,10 +37,16 @@
 motionbricks-unity-bridge/
 ├── README.md                        # 英文版
 ├── README.zh-CN.md                  # 中文版（本文件）
+├── CHANGELOG.md                     # 变更记录
 ├── LICENSE                          # Apache 2.0
+├── docs/
+│   └── TESTING.md                   # 无 GPU 契约测说明
 ├── server/
-│   ├── motionbricks_server.py       # FastAPI 推理服务
-│   └── requirements.txt             # fastapi + uvicorn（装法见下）
+│   ├── protocol.py                  # 无 GPU 的协议模型与校验（测试共用）
+│   ├── motionbricks_server.py       # FastAPI 推理服务（懒加载 warp/motionbricks）
+│   ├── requirements.txt             # fastapi + uvicorn（装法见下）
+│   ├── requirements-dev.txt         # pytest + httpx（契约测）
+│   └── tests/                       # 无 GPU 契约测（TestClient + 假引擎）
 └── unity/
     ├── Scripts/                     # 运行时脚本（拷进任意非 Editor 目录）
     │   ├── SomaPose.cs              # 姿态数据结构 + 手写 JSON 编解码（无第三方依赖）
@@ -62,6 +68,18 @@ motionbricks-unity-bridge/
 
 客户端：
 - Unity 2021.3+，角色带 Humanoid Avatar；只用 UnityWebRequest + 手写 JSON，不依赖第三方包
+
+## 测试
+
+无 GPU 契约测说明见 [docs/TESTING.md](docs/TESTING.md)：
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install -r server/requirements-dev.txt
+.venv/bin/pytest server/tests -v
+```
+
+真实 GPU 上的 `/generate` 验收仍需连上 CUDA/TensorRT 机器后手动做。
 
 ## 服务端启动
 

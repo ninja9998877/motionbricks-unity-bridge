@@ -20,6 +20,7 @@
     MOTIONBRICKS_PRECISION  fp32（默认）或 fp16（用仓库自带的混合精度 ONNX）
     MOTIONBRICKS_CACHE_DIR   TensorRT plan 缓存目录，默认 .trt-cache
     MOTIONBRICKS_FORCE_REBUILD  设为 1 时强制重建 plan
+    MOTIONBRICKS_SKIP_ENGINE    设为 1 时跳过引擎加载（仅供契约测试；/generate 需注入假引擎）
 
 协议见 README.md。未经 GPU 实测：本服务只能在有 NVIDIA GPU 的机器上运行，
 作者的开发机没有 GPU，推理链路尚未端到端验证，首次部署请按 README 的验证步骤走。
@@ -30,40 +31,30 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import math
 import os
 import threading
 from contextlib import asynccontextmanager
 from typing import Any
 
-import warp as wp
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
 
-from motionbricks.animation.skeleton import Skeleton
-from motionbricks.inference.builder import TensorRTBuildOptions
-from motionbricks.model.soma.contract import (
-    SOMA_N1_CONTRACT,
-    SOMA_N1_FP16_ONNX_PATH,
-    SOMA_N1_FP32_ONNX_PATH,
-    SOMA_N1_MANIFEST_PATH,
+from protocol import (
+    CONTEXT_POSES,
+    DEFAULT_MODEL_NAME,
+    GenerateRequest,
+    JOINT_NAMES,
+    MAX_TARGET_POSES,
+    MIN_TARGET_POSES,
+    NUM_JOINTS,
+    PoseJson,
+    SAMPLE_RATE,
+    info_payload,
+    validate_generate_counts,
+    validate_pose,
+    validate_transform,
 )
-from motionbricks.model.soma.engine import MotionBricksSOMAEngine
 
 log = logging.getLogger("motionbricks_server")
-
-# ---------------------------------------------------------------------------
-# 模型常量（来自仓库 manifest：30 个关节，root 为 index 0，30Hz）
-# ---------------------------------------------------------------------------
-JOINT_NAMES: list[str] = list(SOMA_N1_CONTRACT.joint_names)
-NUM_JOINTS = len(JOINT_NAMES)          # 30
-SAMPLE_RATE = 30.0
-CONTEXT_POSES = 4                      # context 固定 4 个姿态
-MIN_TARGET_POSES = 1
-MAX_TARGET_POSES = 4
-
-with open(SOMA_N1_MANIFEST_PATH, encoding="utf-8") as _f:
-    MODEL_NAME = json.load(_f).get("name", "soma_n1")
 
 # SOMA 骨架的父子关系（按 JOINT_NAMES 的顺序索引）。
 # 只用于构造服务端的 Skeleton 占位骨架：引擎要求骨架包含全部 30 个模型关节、
@@ -101,57 +92,87 @@ _JOINT_OFFSETS = {
     "RightFoot": (0.00, -0.42, 0.00), "RightToeBase": (0.00, -0.05, 0.15),
 }
 
+assert list(_JOINT_PARENTS.keys()) == JOINT_NAMES, "JOINT_NAMES must match skeleton parent table"
+assert list(_JOINT_OFFSETS.keys()) == JOINT_NAMES, "JOINT_NAMES must match skeleton offset table"
 
 # ---------------------------------------------------------------------------
-# warp 小 kernel：把输出 buffer 的有效帧展平成 [帧, 关节, 7] 的 float 数组
+# 全局引擎状态（lifespan 里初始化；测试可注入）
 # ---------------------------------------------------------------------------
-@wp.kernel
-def _flatten_poses_kernel(
-    poses: wp.array2d(dtype=wp.transform),
-    flat: wp.array3d(dtype=wp.float32),
-):
-    frame, joint = wp.tid()
-    t = poses[frame, joint]
-    flat[frame, joint, 0] = t.p[0]
-    flat[frame, joint, 1] = t.p[1]
-    flat[frame, joint, 2] = t.p[2]
-    flat[frame, joint, 3] = t.q[0]
-    flat[frame, joint, 4] = t.q[1]
-    flat[frame, joint, 5] = t.q[2]
-    flat[frame, joint, 6] = t.q[3]
-
-
-# ---------------------------------------------------------------------------
-# 请求 / 响应模型
-# ---------------------------------------------------------------------------
-class TransformJson(BaseModel):
-    p: list[float]  # [x, y, z]，米
-    q: list[float]  # [x, y, z, w] 四元数
-
-
-class PoseJson(BaseModel):
-    # root：姿态的世界放置（Hips 的世界变换，即 index 0 的关节变换）；
-    # joints：30 个关节的局部变换，index 0 为 Hips（其局部变换即世界放置，
-    #         服务端以 root 字段为准，joints[0] 会被 root 覆盖）。
-    root: TransformJson
-    joints: list[list[float]]  # 30 × [x, y, z, x, y, z, w]
-
-
-class GenerateRequest(BaseModel):
-    context: list[PoseJson]  # 必须 4 个
-    targets: list[PoseJson]  # 1~4 个
-
-
-# ---------------------------------------------------------------------------
-# 全局引擎状态（lifespan 里初始化）
-# ---------------------------------------------------------------------------
-_engine: MotionBricksSOMAEngine | None = None
-_skeleton: Skeleton | None = None
+_engine: Any | None = None
+_skeleton: Any | None = None
 _engine_lock = threading.Lock()
+_model_name: str = DEFAULT_MODEL_NAME
+_flatten_poses_kernel = None  # set on first real engine load
 
 
-def _build_skeleton() -> Skeleton:
+def set_engine_for_tests(engine: Any, skeleton: Any = True, model_name: str | None = None) -> None:
+    """Inject a stub engine for GPU-free contract tests. skeleton may be any truthy sentinel."""
+    global _engine, _skeleton, _model_name
+    _engine = engine
+    _skeleton = skeleton
+    if model_name is not None:
+        _model_name = model_name
+
+
+def clear_engine_for_tests() -> None:
+    global _engine, _skeleton
+    _engine = None
+    _skeleton = None
+
+
+def _import_runtime():
+    """Lazy-import warp + motionbricks (only needed on a real GPU host)."""
+    import warp as wp
+    from motionbricks.animation.skeleton import Skeleton
+    from motionbricks.inference.builder import TensorRTBuildOptions
+    from motionbricks.model.soma.contract import (
+        SOMA_N1_CONTRACT,
+        SOMA_N1_FP16_ONNX_PATH,
+        SOMA_N1_FP32_ONNX_PATH,
+        SOMA_N1_MANIFEST_PATH,
+    )
+    from motionbricks.model.soma.engine import MotionBricksSOMAEngine
+
+    return {
+        "wp": wp,
+        "Skeleton": Skeleton,
+        "TensorRTBuildOptions": TensorRTBuildOptions,
+        "SOMA_N1_CONTRACT": SOMA_N1_CONTRACT,
+        "SOMA_N1_FP16_ONNX_PATH": SOMA_N1_FP16_ONNX_PATH,
+        "SOMA_N1_FP32_ONNX_PATH": SOMA_N1_FP32_ONNX_PATH,
+        "SOMA_N1_MANIFEST_PATH": SOMA_N1_MANIFEST_PATH,
+        "MotionBricksSOMAEngine": MotionBricksSOMAEngine,
+    }
+
+
+def _ensure_flatten_kernel(wp):
+    global _flatten_poses_kernel
+    if _flatten_poses_kernel is not None:
+        return _flatten_poses_kernel
+
+    @wp.kernel
+    def _flatten_poses_kernel_impl(
+        poses: wp.array2d(dtype=wp.transform),
+        flat: wp.array3d(dtype=wp.float32),
+    ):
+        frame, joint = wp.tid()
+        t = poses[frame, joint]
+        flat[frame, joint, 0] = t.p[0]
+        flat[frame, joint, 1] = t.p[1]
+        flat[frame, joint, 2] = t.p[2]
+        flat[frame, joint, 3] = t.q[0]
+        flat[frame, joint, 4] = t.q[1]
+        flat[frame, joint, 5] = t.q[2]
+        flat[frame, joint, 6] = t.q[3]
+
+    _flatten_poses_kernel = _flatten_poses_kernel_impl
+    return _flatten_poses_kernel
+
+
+def _build_skeleton(rt) -> Any:
     """构造与模型关节顺序一致的占位骨架（父子关系 + 近似参考姿态）。"""
+    wp = rt["wp"]
+    Skeleton = rt["Skeleton"]
     parent_indices = [_JOINT_PARENTS[name] for name in JOINT_NAMES]
     local = []
     for name in JOINT_NAMES:
@@ -160,31 +181,41 @@ def _build_skeleton() -> Skeleton:
     return Skeleton(JOINT_NAMES, parent_indices, local)
 
 
-def _load_engine() -> tuple[MotionBricksSOMAEngine, Skeleton]:
+def _load_engine() -> tuple[Any, Any]:
+    global _model_name
+    rt = _import_runtime()
+    contract_names = list(rt["SOMA_N1_CONTRACT"].joint_names)
+    if contract_names != JOINT_NAMES:
+        raise RuntimeError(
+            f"protocol.JOINT_NAMES 与 SOMA_N1_CONTRACT 不一致：{contract_names!r}"
+        )
+
+    with open(rt["SOMA_N1_MANIFEST_PATH"], encoding="utf-8") as f:
+        _model_name = json.load(f).get("name", DEFAULT_MODEL_NAME)
+
     precision = os.environ.get("MOTIONBRICKS_PRECISION", "fp32").lower()
     cache_dir = os.environ.get("MOTIONBRICKS_CACHE_DIR", ".trt-cache")
     force_rebuild = os.environ.get("MOTIONBRICKS_FORCE_REBUILD", "0") == "1"
 
     if precision == "fp16":
-        # 混合精度 ONNX：敏感算子保持 FP32，输入输出仍是 FP32。
-        onnx_path = SOMA_N1_FP16_ONNX_PATH
-        build_options = TensorRTBuildOptions(enable_fp16=True)
+        onnx_path = rt["SOMA_N1_FP16_ONNX_PATH"]
+        build_options = rt["TensorRTBuildOptions"](enable_fp16=True)
     elif precision == "fp32":
-        onnx_path = SOMA_N1_FP32_ONNX_PATH
+        onnx_path = rt["SOMA_N1_FP32_ONNX_PATH"]
         build_options = None
     else:
         raise ValueError(f"MOTIONBRICKS_PRECISION 只支持 fp32/fp16， got {precision!r}")
 
-    log.info("正在加载 MotionBricks SOMA 引擎（%s，%s）…", MODEL_NAME, precision)
+    log.info("正在加载 MotionBricks SOMA 引擎（%s，%s）…", _model_name, precision)
     log.info("首次启动会构建 TensorRT plan，需要几分钟，请耐心等待。")
-    # SOMA 模型空间本身就是 Y-up，与协议一致，用默认的 identity model_to_runtime。
-    engine = MotionBricksSOMAEngine(
+    engine = rt["MotionBricksSOMAEngine"](
         onnx_path,
         build_options=build_options,
         cache_dir=cache_dir,
         force_rebuild=force_rebuild,
     )
-    skeleton = _build_skeleton()
+    skeleton = _build_skeleton(rt)
+    _ensure_flatten_kernel(rt["wp"])
     log.info("引擎加载完成，device=%s", engine.device)
     return engine, skeleton
 
@@ -192,64 +223,38 @@ def _load_engine() -> tuple[MotionBricksSOMAEngine, Skeleton]:
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     global _engine, _skeleton
+    if os.environ.get("MOTIONBRICKS_SKIP_ENGINE", "0") == "1":
+        log.info("MOTIONBRICKS_SKIP_ENGINE=1：跳过引擎加载（契约测试模式）")
+        yield
+        return
     _engine, _skeleton = _load_engine()
     yield
     if _engine is not None:
-        _engine.close()
+        close = getattr(_engine, "close", None)
+        if callable(close):
+            close()
         _engine = None
 
 
 app = FastAPI(title="MotionBricks Unity Bridge", lifespan=_lifespan)
 
 
-# ---------------------------------------------------------------------------
-# JSON → warp 变换
-# ---------------------------------------------------------------------------
-def _parse_transform(p: list[float], q: list[float], what: str) -> wp.transform:
-    if len(p) != 3 or len(q) != 4:
-        raise ValueError(f"{what}：p 须 3 个数、q 须 4 个数")
-    if not all(math.isfinite(v) for v in (*p, *q)):
-        raise ValueError(f"{what}：含非有限数值")
-    norm = math.sqrt(sum(v * v for v in q))
-    if norm < 1e-8:
-        raise ValueError(f"{what}：四元数接近零向量")
-    q = [v / norm for v in q]  # 归一化，避免非法旋转污染推理
-    return wp.transform(wp.vec3(*p), wp.quat(*q))
-
-
-def _pose_to_transforms(pose: PoseJson, index: int) -> list[wp.transform]:
+def _pose_to_transforms(pose: PoseJson, index: int, wp) -> list[Any]:
     """一个 PoseJson → 30 个 wp.transform（index 0 为 root 的世界放置）。"""
-    if len(pose.joints) != NUM_JOINTS:
-        raise ValueError(f"姿态 {index}：joints 须 {NUM_JOINTS} 个，got {len(pose.joints)}")
+    validate_pose(pose, index)
     transforms = [None] * NUM_JOINTS
-    transforms[0] = _parse_transform(pose.root.p, pose.root.q, f"姿态 {index} 的 root")
+    p, q = validate_transform(pose.root.p, pose.root.q, f"姿态 {index} 的 root")
+    transforms[0] = wp.transform(wp.vec3(*p), wp.quat(*q))
     for j in range(1, NUM_JOINTS):
         vals = pose.joints[j]
-        if len(vals) != 7:
-            raise ValueError(f"姿态 {index} 关节 {j}：须 7 个数，got {len(vals)}")
-        transforms[j] = _parse_transform(vals[:3], vals[3:], f"姿态 {index} 关节 {j}")
-    # joints[0] 视为冗余：以 root 为准（两者在正确客户端里本就一致）。
+        jp, jq = validate_transform(vals[:3], vals[3:], f"姿态 {index} 关节 {j}")
+        transforms[j] = wp.transform(wp.vec3(*jp), wp.quat(*jq))
     return transforms
 
 
-# ---------------------------------------------------------------------------
-# 路由
-# ---------------------------------------------------------------------------
 @app.get("/info")
 def info() -> dict[str, Any]:
-    return {
-        "model": MODEL_NAME,
-        "rig": "SOMA",
-        "sample_rate": SAMPLE_RATE,
-        "num_joints": NUM_JOINTS,
-        "joint_names": JOINT_NAMES,
-        "coordinate_system": (
-            "Y-up 右手系，米制；即 SOMA 模型空间。"
-            "每个姿态 30 个关节局部变换，index 0（Hips）为 root，其局部变换即世界放置。"
-        ),
-        "context_poses": CONTEXT_POSES,
-        "target_pose_range": [MIN_TARGET_POSES, MAX_TARGET_POSES],
-    }
+    return info_payload(_model_name)
 
 
 @app.get("/health")
@@ -262,31 +267,49 @@ def generate(req: GenerateRequest) -> dict[str, Any]:
     """context（4 个姿态）+ targets（1~4 个姿态）→ 生成的动作帧。"""
     if _engine is None or _skeleton is None:
         raise HTTPException(status_code=503, detail="引擎尚未就绪")
-    if len(req.context) != CONTEXT_POSES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"context 须恰好 {CONTEXT_POSES} 个姿态，got {len(req.context)}",
-        )
-    if not MIN_TARGET_POSES <= len(req.targets) <= MAX_TARGET_POSES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"targets 须 {MIN_TARGET_POSES}~{MAX_TARGET_POSES} 个姿态，got {len(req.targets)}",
-        )
+    try:
+        validate_generate_counts(len(req.context), len(req.targets))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Stub / fake engines used in tests: expose generate_from_request and skip warp.
+    stub = getattr(_engine, "generate_from_request", None)
+    if callable(stub):
+        try:
+            for i, pose in enumerate(req.context):
+                validate_pose(pose, i)
+            for i, pose in enumerate(req.targets):
+                validate_pose(pose, i)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        try:
+            with _engine_lock:
+                return stub(req)
+        except HTTPException:
+            raise
+        except Exception as e:
+            log.exception("推理失败")
+            raise HTTPException(status_code=500, detail=f"推理失败：{e}")
+
+    try:
+        import warp as wp
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"warp 不可用：{e}")
 
     try:
         context_transforms = [
             t for i, pose in enumerate(req.context)
-            for t in _pose_to_transforms(pose, i)
+            for t in _pose_to_transforms(pose, i, wp)
         ]
         target_transforms = [
             t for i, pose in enumerate(req.targets)
-            for t in _pose_to_transforms(pose, i)
+            for t in _pose_to_transforms(pose, i, wp)
         ]
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     try:
-        with _engine_lock:  # GPU 推理串行化，避免并发请求互相踩 buffer
+        with _engine_lock:
             engine, skeleton = _engine, _skeleton
             context = engine.create_input(skeleton)
             target = engine.create_input(skeleton)
@@ -303,22 +326,21 @@ def generate(req: GenerateRequest) -> dict[str, Any]:
                 stream=engine.stream,
             )
             engine.generate_animation(context, target, output)
-            # generate_animation 内部已 synchronize；下面再读有效帧并展平。
 
             num_frames = output.num_frames
             flat = wp.empty((num_frames, NUM_JOINTS, 7), dtype=wp.float32, device=engine.device)
             wp.launch(
-                _flatten_poses_kernel,
+                _ensure_flatten_kernel(wp),
                 dim=(num_frames, NUM_JOINTS),
                 inputs=[output.poses, flat],
                 device=engine.device,
                 stream=engine.stream,
             )
             engine.synchronize()
-            frames_np = flat.numpy()  # [F, 30, 7]，float32
+            frames_np = flat.numpy()
     except HTTPException:
         raise
-    except Exception as e:  # 推理异常 → 500 并返回错误信息
+    except Exception as e:
         log.exception("推理失败")
         raise HTTPException(status_code=500, detail=f"推理失败：{e}")
 
@@ -333,7 +355,6 @@ def generate(req: GenerateRequest) -> dict[str, Any]:
     return {"frames": frames, "num_frames": num_frames, "sample_rate": SAMPLE_RATE}
 
 
-# ---------------------------------------------------------------------------
 def main() -> None:
     parser = argparse.ArgumentParser(description="MotionBricks SOMA 推理 HTTP 服务")
     parser.add_argument("--host", default="127.0.0.1")
