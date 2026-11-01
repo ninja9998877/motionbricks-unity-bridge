@@ -212,7 +212,7 @@ see `SomaHumanoidMapper.MirrorPosition/MirrorRotation`.
 
 ## Limitations (must read)
 
-1. **GPU first-boot verified on Nick (2026-11-01)**; full Humanoid Clip Baker still needs a character asset on that machine.
+1. **GPU first-boot verified on Nick (2026-11-01)**; Humanoid Clip Baker path later PASS on Nick with Timeline `DefaultMale` (see GPU verify addendum).
    On first deployment, `curl /info` first, then validate frame counts / motion sanity with a few
    small requests before wiring up Unity.
 2. **Verify the mirror transform with a T-pose**: `z → -z` is the standard mirror assumption,

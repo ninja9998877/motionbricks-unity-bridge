@@ -205,7 +205,7 @@ uv run python /path/to/motionbricks-unity-bridge/server/motionbricks_server.py
 
 ## 已知限制（必读）
 
-1. **GPU 首启已在 Nick（2026-11-01）验证**；完整 Humanoid Clip Baker 仍需本机有角色资源。
+1. **GPU 首启已在 Nick（2026-11-01）验证**；随后 Humanoid Clip Baker 路径已在 Nick 用 Timeline `DefaultMale` 验过（见 GPU 验收补记）。
    换新机器部署时仍建议先 `curl /info`，再用少量请求确认帧数/动作合理性后再接 Unity。
 2. **坐标系镜像转换需用 T-pose 验证**：`z → -z` 是标准镜像假设，
    但不同角色的建模朝向可能不同。首次使用请按 `SomaHumanoidMapper` 注释里的三步

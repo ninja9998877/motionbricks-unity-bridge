@@ -46,7 +46,7 @@ Server-only extras (near-zero quaternion rejection, count checks) are tested via
 | Unity 2022.3.62f3 compile | PASS (demo project `D:\projects\motionbricks-unity-demo`) |
 | Unity Editor HTTP smoke | PASS — `/health` `/info` `/generate` via same wire as Clip Baker (`num_frames=26`, frame0 root.y=0.98) |
 | Unity `.anim` write | PASS — `Assets/MotionBricks/Baked/GpuVerifyTPose.anim` (root curves from generate frames) |
-| Full Humanoid Clip Baker / Play Mode | **Skipped** — no Humanoid character asset on disk for a quick import |
+| Full Humanoid Clip Baker path | **PASS** — `DefaultMale` Humanoid capture→`/generate`→bone `.anim` (203 curves); see GPU verify addendum |
 
 Checklist log: [GPU_VERIFY_NICK_2026-11-01.md](GPU_VERIFY_NICK_2026-11-01.md).
 
@@ -58,3 +58,11 @@ Checklist log: [GPU_VERIFY_NICK_2026-11-01.md](GPU_VERIFY_NICK_2026-11-01.md).
 4. POST a small `/generate` with 4 context + 1 target T-poses; expect `num_frames` about 18–58,
    frame 0 ≈ last context, no NaNs in joints.
 5. Optional: Unity Editor project with `unity/Scripts` + `unity/Editor` imported; open **Tools > MotionBricks > Clip Baker** and Test Connection; with a Humanoid + mapper, Bake All Takes.
+
+For the Nick Humanoid bake batchmode (after importing a Humanoid under `Assets/Characters/...`):
+
+```text
+Unity.exe -batchmode -nographics -quit -projectPath D:\projects\motionbricks-unity-demo ^
+  -executeMethod MotionBricksBridge.Editor.MotionBricksHumanoidVerify.Run ^
+  -logFile D:\projects\motionbricks-gpu-verify\humanoid_verify.log
+```

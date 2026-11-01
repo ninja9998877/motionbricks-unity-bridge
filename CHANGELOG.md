@@ -11,12 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `MotionBricksBakeRunner`: do not `yield` inside `try/catch` (CS1626 on Unity 2022+); segment errors use `_segmentError` instead
 
 ### Verified
-- **2026-11-01 Asia/Shanghai — Nick PC GPU first-boot PASS** (RTX 3060): `/health` `/info` `/generate`, TensorRT ~116 s first plan then cache; Unity 2022.3.62f3 scripts compile + Editor generate smoke + root `.anim` write. Full Humanoid baker Play Mode skipped (no Humanoid asset). See [docs/GPU_VERIFY_NICK_2026-11-01.md](docs/GPU_VERIFY_NICK_2026-11-01.md).
+- **2026-11-01 Asia/Shanghai — Nick PC GPU first-boot PASS** (RTX 3060): `/health` `/info` `/generate`, TensorRT ~116 s first plan then cache; Unity 2022.3.62f3 scripts compile + Editor generate smoke + root `.anim` write. See [docs/GPU_VERIFY_NICK_2026-11-01.md](docs/GPU_VERIFY_NICK_2026-11-01.md).
+- **2026-11-01 Asia/Shanghai — Humanoid Clip Baker path PASS** on Nick: Timeline sample `DefaultMale.fbx` (no Asset Store login); CapturePose → `/generate` (50 frames) → bone-curve `.anim` (203 bindings); prefab `DefaultMale_MotionBricks`. Batchmethod `MotionBricksHumanoidVerify.Run`.
+
+### Added
+- Editor batch verify: `unity/Editor/Verify/MotionBricksHumanoidVerify.cs` (Humanoid import + capture + bake)
 
 ### Planned
 - T-pose mirror-axis verification checklist automation notes for `SomaHumanoidMapper`
 - Optional CI job for `pytest` + `py_compile` (no GPU)
-- Humanoid end-to-end Clip Baker bake once a character asset is available
+- Optional interactive Play Mode `LocomotionDemo` smoke on the same DefaultMale prefab
 
 ## [0.1.0] - 2026-10-31
 
